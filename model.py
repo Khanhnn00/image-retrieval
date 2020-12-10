@@ -1,80 +1,86 @@
 import torch
-import numpy as np
-import os
-import matplotlib.pyplot as plt
-from PIL import Image
+from torch import nn
+from torch.nn import functional as F
 
-import torchvision.models as models
-import torch
-import torch.nn as nn
-import torch.nn.parallel
-import torch.backends.cudnn as cudnn
-import torch.optim
-from torch.utils.data import Dataset, DataLoader
-import torchvision.transforms as transforms
-import torchvision.datasets as datasets
-import torchvision.models as models
+from resnet import resnet50, resnext50_32x4d, wide_resnet50_2
 
-# model = models.vgg19(pretrained=True, progress=True)
-# model = models.densenet161(pretrained=True, progress=True)
-# model = models.squeezenet1_0(pretrained=True)
-model = models.resnet101(pretrained=True, progress=True)
-#model = models.wide_resnet50_2(pretrained=True)
-# modal.cuda()
-model.eval()
 
-normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                  std=[0.229, 0.224, 0.225])
-class Database(Dataset):
-    def __init__(self, path, transforms=None):
-        self.path = path
-        self.img_paths = os.listdir(path)
-        self.transforms = transforms
-    def __len__(self):
-        return len(self.img_paths)
-    def __getitem__(self, index):
-        img = Image.open(os.path.join(self.path, self.img_paths[index]))
-        if self.transforms:
-            img = self.transforms(img)
-        return img
+def set_bn_eval(m):
+    classname = m.__class__.__name__
+    if classname.find('BatchNorm2d') != -1:
+        m.eval()
 
-transforms = transforms.Compose([
-        transforms.Scale(256),
-        transforms.CenterCrop(224),
-        transforms.ToTensor(),
-        normalize,
-    ])
 
-database = Database("./data", transforms)
-val_loader = torch.utils.data.DataLoader(
-    database,
-    batch_size=1, shuffle=False,
-    num_workers=0, pin_memory=True)
+class GlobalDescriptor(nn.Module):
+    def __init__(self, p=1):
+        super().__init__()
+        self.p = p
 
-features = []
-with torch.no_grad():
-    for batch in val_loader:
-        # features.append(model.features(batch.cuda()).flatten(start_dim=1))
-        # features.append(model.features(batch).flatten(start_dim=1))
-        features.append(model(batch).flatten(start_dim=1))#for fucking resnet
-features = torch.cat(features, dim=0)
+    def forward(self, x):
+        assert x.dim() == 4, 'the input tensor of GlobalDescriptor must be the shape of [B, C, H, W]'
+        if self.p == 1:
+            return x.mean(dim=[-1, -2])
+        elif self.p == float('inf'):
+            return torch.flatten(F.adaptive_max_pool2d(x, output_size=(1, 1)), start_dim=1)
+        else:
+            sum_value = x.pow(self.p).mean(dim=[-1, -2])
+            return torch.sign(sum_value) * (torch.abs(sum_value).pow(1.0 / self.p))
 
-print(features.shape)
+    def extra_repr(self):
+        return 'p={}'.format(self.p)
 
-with torch.no_grad():
-    img = Image.open("./query/bigben.jpg")
-    img = transforms(img)
-    # query = model.features(img.unsqueeze(0).cuda()).flatten(start_dim=1)
-    # query = model.features(img.unsqueeze(0))
-    query = model(img.unsqueeze(0)) #for fucking resnet
-    query = query.flatten(start_dim=1)
-print(query.size())
-#for cosine metric
-cosine = torch.nn.CosineSimilarity(1)
-results = cosine(query, features)
-_, idx = results.topk(5)
-for i in range(5):  
-  img = Image.open(os.path.join("./data", os.listdir("./data")[idx[i]]))
-  print(os.path.join("./data", os.listdir("./data")[idx[i]]))
-#   plt.imshow(img)
-#   plt.show()
+
+class L2Norm(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        assert x.dim() == 2, 'the input tensor of L2Norm must be the shape of [B, C]'
+        return F.normalize(x, p=2, dim=-1)
+
+
+class Model(nn.Module):
+    def __init__(self, backbone_type, gd_config, feature_dim, num_classes):
+        super().__init__()
+
+        # Backbone Network
+        backbone = resnet50(pretrained=True) if backbone_type == 'resnet50' else resnext50_32x4d(pretrained=True)
+        self.features = []
+        for name, module in backbone.named_children():
+            if isinstance(module, nn.AdaptiveAvgPool2d) or isinstance(module, nn.Linear):
+                continue
+            self.features.append(module)
+        self.features = nn.Sequential(*self.features)
+
+        # Main Module
+        n = len(gd_config)
+        k = feature_dim // n
+        assert feature_dim % n == 0, 'the feature dim should be divided by number of global descriptors'
+
+        self.global_descriptors, self.main_modules = [], []
+        for i in range(n):
+            if gd_config[i] == 'S':
+                p = 1
+            elif gd_config[i] == 'M':
+                p = float('inf')
+            else:
+                p = 3
+            self.global_descriptors.append(GlobalDescriptor(p=p))
+            self.main_modules.append(nn.Sequential(nn.Linear(2048, k, bias=False), L2Norm()))
+        self.global_descriptors = nn.ModuleList(self.global_descriptors)
+        self.main_modules = nn.ModuleList(self.main_modules)
+
+        # Auxiliary Module
+        self.auxiliary_module = nn.Sequential(nn.BatchNorm1d(2048), nn.Linear(2048, num_classes, bias=True))
+
+    def forward(self, x):
+        shared = self.features(x)
+        global_descriptors = []
+        for i in range(len(self.global_descriptors)):
+            global_descriptor = self.global_descriptors[i](shared)
+            if i == 0:
+                classes = self.auxiliary_module(global_descriptor)
+            global_descriptor = self.main_modules[i](global_descriptor)
+            global_descriptors.append(global_descriptor)
+        global_descriptors = F.normalize(torch.cat(global_descriptors, dim=-1), dim=-1)
+        return global_descriptors, classes
