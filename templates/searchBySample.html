@@ -16,7 +16,7 @@
 
 <body>
     <div class="col text-center header">
-        <a href="/">
+        <a href="../../">
             <button type="button" class="btn btn-danger">BACK HOME</button>
         </a>
 
@@ -25,17 +25,29 @@
     </div>
 
     <div id="images" class="col text-center">
+        <!-- <a href="Samples/1.jpg">
+            <img src="https://live.staticflickr.com/4649/39665153822_97e9ebca2c_z.jpg">
+        </a>
 
-        {% for img in imgs %}
+        <a href="Samples/2.jpg">
+            <img src="https://live.staticflickr.com/2530/3840919509_e15ef7aed3_z.jpg">
+        </a>
+
         <br>
-        <a href='../{{img}}'><img src="../static/images/{{img}}" width=10%></a>
+        <a href="Samples/3.jpg">
+            <img src="https://live.staticflickr.com/738/21608953965_3ff3c9e2bf_z.jpg">
+        </a> -->
+        {% for i in imgs %}
+        <a href='../{{i}}'><img src="../../static/images/{{ i }}" width=30%></a>
+        <br>
         <br>
         {% endfor %}
+        <br>
 
     </div>
 </body>
 
-<!-- <script>
+<script>
     var folder = "Samples/"
     jQuery.ajax({
         url: folder,
@@ -47,6 +59,6 @@
             });
         }
     });
-</script> -->
+</script>
 
 </html>
